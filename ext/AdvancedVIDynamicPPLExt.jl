@@ -3,7 +3,6 @@ module AdvancedVIDynamicPPLExt
 using ADTypes: ADTypes
 using Accessors
 using AdvancedVI: AdvancedVI
-using DifferentiationInterface: DifferentiationInterface
 using Distributions: Distributions
 using DynamicPPL: DynamicPPL
 using LogDensityProblems: LogDensityProblems
@@ -15,27 +14,13 @@ function adtype_capabilities(::Type{<:ADTypes.AbstractADType})
     return LogDensityProblems.LogDensityOrder{1}()
 end
 
-function adtype_capabilities(
-    ::Type{
-        <:Union{
-            <:ADTypes.AutoForwardDiff,
-            <:ADTypes.AutoReverseDiff,
-            <:ADTypes.AutoMooncake,
-            <:ADTypes.AutoEnzyme,
-            <:DifferentiationInterface.SecondOrder,
-        },
-    },
-)
-    return LogDensityProblems.LogDensityOrder{2}()
-end
-
 struct DynamicPPLModelLogDensityFunction{
     Model<:DynamicPPL.Model,
     LogLikeAdj<:Real,
     VarInfo<:DynamicPPL.AbstractVarInfo,
-    ADType<:ADTypes.AbstractADType,
-    PrepGrad<:Union{Nothing,DifferentiationInterface.GradientPrep},
-    PrepHess<:Union{Nothing,DifferentiationInterface.HessianPrep},
+    ADType,
+    PrepGrad,
+    PrepHess,
 }
     model::Model
     loglikeadj::LogLikeAdj
@@ -54,6 +39,10 @@ function logdensity_impl(
     logprior = DynamicPPL.getlogprior(vi)
     logjac = DynamicPPL.getlogjac(vi)
     return convert(eltype(params), loglikeadj) * loglike + logprior - logjac
+end
+
+function logdensity_impl(params, aux::NamedTuple{(:model, :loglikeadj, :varinfo)})
+    return logdensity_impl(params, aux.model, aux.loglikeadj, aux.varinfo)
 end
 
 function subsample_dynamicpplmodel(
@@ -82,35 +71,13 @@ function DynamicPPLModelLogDensityFunction(
 
     params = [val for val in varinfo[:]]
     cap = adtype_capabilities(typeof(adtype))
+    aux = (model=model_sub, loglikeadj=loglikeadj, varinfo=varinfo)
     prep_grad = if cap >= LogDensityProblems.LogDensityOrder{1}()
-        DifferentiationInterface.prepare_gradient(
-            logdensity_impl,
-            DifferentiationInterface.inner(adtype),
-            params,
-            DifferentiationInterface.Constant(model_sub),
-            DifferentiationInterface.Constant(loglikeadj),
-            DifferentiationInterface.Constant(varinfo),
-        )
+        AdvancedVI._prepare_gradient(logdensity_impl, adtype, params, aux)
     else
         nothing
     end
-    prep_hess = if cap >= LogDensityProblems.LogDensityOrder{2}() && use_hessian
-        try
-            DifferentiationInterface.prepare_hessian(
-                logdensity_impl,
-                adtype,
-                params,
-                DifferentiationInterface.Constant(model_sub),
-                DifferentiationInterface.Constant(loglikeadj),
-                DifferentiationInterface.Constant(varinfo),
-            )
-        catch
-            @warn "The selected AD backend has second-order capabilities but `DifferentiationInterface.prepare_hessian` failed. AdvancedVI will treat the model to only have first-order capability."
-            nothing
-        end
-    else
-        nothing
-    end
+    prep_hess = nothing
     return DynamicPPLModelLogDensityFunction{
         typeof(model),
         typeof(loglikeadj),
@@ -132,35 +99,13 @@ function LogDensityProblems.logdensity_and_gradient(
     prob::DynamicPPLModelLogDensityFunction, params
 )
     (; model, adtype, loglikeadj, varinfo, prep_grad) = prob
-    return DifferentiationInterface.value_and_gradient(
-        logdensity_impl,
-        prep_grad,
-        DifferentiationInterface.inner(adtype),
-        params,
-        DifferentiationInterface.Constant(model),
-        DifferentiationInterface.Constant(loglikeadj),
-        DifferentiationInterface.Constant(varinfo),
-    )
-end
-
-function LogDensityProblems.logdensity_gradient_and_hessian(
-    prob::DynamicPPLModelLogDensityFunction, params
-)
-    (; model, adtype, loglikeadj, varinfo, prep_hess) = prob
-    return DifferentiationInterface.value_gradient_and_hessian(
-        logdensity_impl,
-        prep_hess,
-        adtype,
-        params,
-        DifferentiationInterface.Constant(model),
-        DifferentiationInterface.Constant(loglikeadj),
-        DifferentiationInterface.Constant(varinfo),
-    )
+    aux = (model=model, loglikeadj=loglikeadj, varinfo=varinfo)
+    return AdvancedVI._value_and_gradient(logdensity_impl, prep_grad, adtype, params, aux)
 end
 
 function LogDensityProblems.capabilities(
     ::Type{<:DynamicPPLModelLogDensityFunction{M,L,V,ADType,PG,PH}}
-) where {M,L,V,ADType<:ADTypes.AbstractADType,PG,PH}
+) where {M,L,V,ADType,PG,PH}
     return if PH != Nothing
         LogDensityProblems.LogDensityOrder{2}()
     elseif PG != Nothing
