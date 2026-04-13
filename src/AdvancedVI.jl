@@ -74,7 +74,7 @@ function _value_and_gradient(f, prep, ad, x, aux)
 end
 
 """
-    _prepare_gradient!(f, ad, x, aux)
+    _prepare_gradient(f, ad, x, aux)
 
 Prepare AD backend for taking gradients of a function `f` at `x` using the automatic differentiation backend `ad`.
 

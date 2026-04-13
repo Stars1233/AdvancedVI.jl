@@ -1,5 +1,7 @@
 
 @testset "DynamicPPL" begin
+    import DifferentiationInterface as DI
+
     DynamicPPL.@model function normal(μ)
         return x ~ MvNormal(μ, I)
     end
@@ -54,5 +56,26 @@
         Δλ0 = sum(abs2, q0.location - μ_true)
         Δλ = sum(abs2, q.location - μ_true)
         @test Δλ ≤ Δλ0 / 2
+    end
+
+    @testset "second order capabilities" begin
+        μ_true = [-2.0, 2.0]
+
+        model = normal(μ_true)
+        vi = DynamicPPL.VarInfo(model)
+        vi = DynamicPPL.link!!(vi, model)
+
+        ext = Base.get_extension(AdvancedVI, :AdvancedVIDynamicPPLExt)
+        backend = DI.SecondOrder(AutoForwardDiff(), AutoReverseDiff())
+        prob = ext.DynamicPPLModelLogDensityFunction(model, vi; adtype=backend)
+
+        params = [val for val in vi[:]]
+        value, grad, hess = LogDensityProblems.logdensity_gradient_and_hessian(prob, params)
+
+        @test LogDensityProblems.capabilities(typeof(prob)) ==
+            LogDensityProblems.LogDensityOrder{2}()
+        @test isfinite(value)
+        @test size(grad) == size(params)
+        @test size(hess) == (length(params), length(params))
     end
 end

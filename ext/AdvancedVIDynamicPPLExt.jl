@@ -72,12 +72,26 @@ function DynamicPPLModelLogDensityFunction(
     params = [val for val in varinfo[:]]
     cap = adtype_capabilities(typeof(adtype))
     aux = (model=model_sub, loglikeadj=loglikeadj, varinfo=varinfo)
-    prep_grad = if cap >= LogDensityProblems.LogDensityOrder{1}()
+    di_ext = Base.get_extension(AdvancedVI, :AdvancedVIDifferentiationInterfaceExt)
+    prep_grad = if !isnothing(di_ext) && adtype isa di_ext.DI.SecondOrder
+        di_ext.DI.prepare_gradient(
+            logdensity_impl, di_ext.DI.inner(adtype), params, di_ext.DI.Constant(aux)
+        )
+    elseif cap >= LogDensityProblems.LogDensityOrder{1}()
         AdvancedVI._prepare_gradient(logdensity_impl, adtype, params, aux)
     else
         nothing
     end
-    prep_hess = nothing
+    prep_hess = if !isnothing(di_ext) && adtype isa di_ext.DI.SecondOrder && use_hessian
+        try
+            di_ext.DI.prepare_hessian(logdensity_impl, adtype, params, di_ext.DI.Constant(aux))
+        catch
+            @warn "The selected AD backend has second-order capabilities but `DifferentiationInterface.prepare_hessian` failed. AdvancedVI will treat the model to only have first-order capability."
+            nothing
+        end
+    else
+        nothing
+    end
     return DynamicPPLModelLogDensityFunction{
         typeof(model),
         typeof(loglikeadj),
@@ -100,7 +114,36 @@ function LogDensityProblems.logdensity_and_gradient(
 )
     (; model, adtype, loglikeadj, varinfo, prep_grad) = prob
     aux = (model=model, loglikeadj=loglikeadj, varinfo=varinfo)
+    di_ext = Base.get_extension(AdvancedVI, :AdvancedVIDifferentiationInterfaceExt)
+    if !isnothing(di_ext) && adtype isa di_ext.DI.SecondOrder
+        return di_ext.DI.value_and_gradient(
+            logdensity_impl,
+            prep_grad,
+            di_ext.DI.inner(adtype),
+            params,
+            di_ext.DI.Constant(aux),
+        )
+    end
     return AdvancedVI._value_and_gradient(logdensity_impl, prep_grad, adtype, params, aux)
+end
+
+function LogDensityProblems.logdensity_gradient_and_hessian(
+    prob::DynamicPPLModelLogDensityFunction, params
+)
+    (; model, adtype, loglikeadj, varinfo, prep_hess) = prob
+    isnothing(prep_hess) && throw(
+        MethodError(LogDensityProblems.logdensity_gradient_and_hessian, (prob, params))
+    )
+    di_ext = Base.get_extension(AdvancedVI, :AdvancedVIDifferentiationInterfaceExt)
+    isnothing(di_ext) && throw(
+        ArgumentError(
+            "Load `DifferentiationInterface` to use second-order DynamicPPL backends."
+        ),
+    )
+    aux = (model=model, loglikeadj=loglikeadj, varinfo=varinfo)
+    return di_ext.DI.value_gradient_and_hessian(
+        logdensity_impl, prep_hess, adtype, params, di_ext.DI.Constant(aux)
+    )
 end
 
 function LogDensityProblems.capabilities(
